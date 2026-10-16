@@ -11,7 +11,7 @@ from .errors import (
     OverpaymentError,
     UnknownMemberError,
 )
-from .models import Member
+from .models import Member, Payout, WeekCloseResult
 from .money import parse_amount
 
 
@@ -41,6 +41,7 @@ class SusuGroup:
         self._payments: dict[int, dict[str, Decimal]] = defaultdict(
             lambda: defaultdict(lambda: Decimal("0.00"))
         )
+        self.payout_history: list[Payout] = []
 
     # ------------------------------------------------------------------
     # Properties
@@ -186,3 +187,78 @@ class SusuGroup:
     def is_paid_in_full(self, member_id: str, week: int | None = None) -> bool:
         """Return True if member_id has paid the full contribution for the week."""
         return self.amount_owed(member_id, week) == Decimal("0.00")
+
+    # ------------------------------------------------------------------
+    # Week closing and payouts
+    # ------------------------------------------------------------------
+
+    def close_week(self) -> WeekCloseResult:
+        """Attempt to close the current week and issue a payout.
+
+        If every member has paid in full the pot is awarded to the member
+        whose join_order equals current_week, payout_history is updated,
+        and current_week advances.  If any member still owes money no state
+        is changed and closed=False is returned.
+
+        Returns:
+            WeekCloseResult with the outcome.
+
+        Raises:
+            GroupCompletedError: If the group has already finished.
+            ValueError: If fewer than 2 members are in the group.
+        """
+        if self._completed:
+            raise GroupCompletedError("This group has already completed")
+
+        if len(self._members) < 2:
+            raise ValueError(
+                "At least 2 members are required before closing a week"
+            )
+
+        # Collect outstanding balances
+        outstanding: dict[str, Decimal] = {
+            m.id: self.amount_owed(m.id)
+            for m in self.members
+            if not self.is_paid_in_full(m.id)
+        }
+
+        if outstanding:
+            return WeekCloseResult(
+                closed=False,
+                week=self.current_week,
+                payout=None,
+                outstanding=outstanding,
+            )
+
+        # Everyone paid — find this week's recipient by join_order
+        recipient = next(
+            m for m in self.members if m.join_order == self.current_week
+        )
+        pot = self._weekly_contribution * len(self._members)
+        payout = Payout(
+            week=self.current_week,
+            member_id=recipient.id,
+            amount=pot,
+        )
+        self.payout_history.append(payout)
+
+        closed_week = self.current_week
+        self.current_week += 1
+
+        # Mark complete when the last member has been paid
+        if closed_week == len(self._members):
+            self._completed = True
+
+        return WeekCloseResult(closed=True, week=closed_week, payout=payout)
+
+    # ------------------------------------------------------------------
+    # Recipient query
+    # ------------------------------------------------------------------
+
+    def next_recipient(self) -> Member | None:
+        """Return the member due the pot this week, or None if completed."""
+        if self._completed:
+            return None
+        return next(
+            (m for m in self.members if m.join_order == self.current_week), None
+        )

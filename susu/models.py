@@ -1,6 +1,8 @@
 """Dataclasses representing core domain objects."""
 
-from dataclasses import dataclass
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 
@@ -32,3 +34,20 @@ class Payout:
     week: int
     member_id: str
     amount: Decimal
+
+
+@dataclass
+class WeekCloseResult:
+    """Result returned by SusuGroup.close_week().
+
+    Attributes:
+        closed: True if the week was successfully closed and a payout made.
+        week: The week number that was attempted.
+        payout: The Payout issued, or None if the week did not close.
+        outstanding: Mapping of member_id -> amount still owed (empty when closed=True).
+    """
+
+    closed: bool
+    week: int
+    payout: Payout | None
+    outstanding: dict[str, Decimal] = field(default_factory=dict)
