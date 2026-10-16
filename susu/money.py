@@ -1,6 +1,6 @@
 """Money utilities for the susu app. All amounts use Decimal, never float."""
 
-from decimal import Decimal, ROUND_DOWN, InvalidOperation
+from decimal import Decimal, InvalidOperation
 
 
 def parse_amount(value: str | int | Decimal) -> Decimal:
@@ -17,11 +17,21 @@ def parse_amount(value: str | int | Decimal) -> Decimal:
     except InvalidOperation:
         raise ValueError(f"Cannot parse {value!r} as a monetary amount")
 
-    if d < 0:
+    # Guard against Infinity / NaN — both raise InvalidOperation on comparison
+    try:
+        is_negative = d < 0
+    except InvalidOperation:
+        raise ValueError(f"Cannot parse {value!r} as a monetary amount")
+
+    if is_negative:
         raise ValueError(f"Amount cannot be negative: {value!r}")
 
     # Reject more than 2 decimal places — do NOT silently round
-    quantized = d.quantize(Decimal("0.01"))
+    try:
+        quantized = d.quantize(Decimal("0.01"))
+    except InvalidOperation:
+        raise ValueError(f"Cannot parse {value!r} as a monetary amount")
+
     if quantized != d:
         raise ValueError(
             f"Amount {value!r} has more than 2 decimal places; will not round"
