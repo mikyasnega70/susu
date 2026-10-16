@@ -1,11 +1,15 @@
 """SusuGroup: manages members and state for one rotating savings group."""
 
 from decimal import Decimal
+from collections import defaultdict
 
 from .errors import (
     DuplicateMemberError,
+    GroupCompletedError,
     GroupLockedError,
     InvalidAmountError,
+    OverpaymentError,
+    UnknownMemberError,
 )
 from .models import Member
 from .money import parse_amount
@@ -31,7 +35,12 @@ class SusuGroup:
         self._weekly_contribution: Decimal = amount
         self._members: dict[str, Member] = {}  # normalised_id -> Member
         self._locked: bool = False              # True once week-1 contributions start
+        self._completed: bool = False
         self.current_week: int = 1
+        # payments[week][normalised_member_id] -> cumulative Decimal paid
+        self._payments: dict[int, dict[str, Decimal]] = defaultdict(
+            lambda: defaultdict(lambda: Decimal("0.00"))
+        )
 
     # ------------------------------------------------------------------
     # Properties
@@ -93,3 +102,87 @@ class SusuGroup:
     def _lock(self) -> None:
         """Lock the group so no more members can be added."""
         self._locked = True
+
+    def _resolve_week(self, week: int | None) -> int:
+        """Return current_week when week is None, else the given week."""
+        return self.current_week if week is None else week
+
+    def _check_member(self, normalised_id: str) -> None:
+        """Raise UnknownMemberError if the ID is not in the group."""
+        if normalised_id not in self._members:
+            raise UnknownMemberError(f"No member with id {normalised_id!r}")
+
+    # ------------------------------------------------------------------
+    # Contribution recording
+    # ------------------------------------------------------------------
+
+    def record_contribution(
+        self, member_id: str, amount: str | int | Decimal
+    ) -> Decimal:
+        """Record a (partial or full) contribution for the current week.
+
+        Args:
+            member_id: Member making the payment (trimmed, case-insensitive).
+            amount: Amount being paid. Must be > 0 and not exceed what is still owed.
+
+        Returns:
+            The member's cumulative payment for this week after recording.
+
+        Raises:
+            GroupCompletedError: If the group has already finished.
+            ValueError: If fewer than 2 members are in the group.
+            UnknownMemberError: If member_id is not recognised.
+            InvalidAmountError: If amount is zero, negative, or malformed.
+            OverpaymentError: If amount exceeds the remaining balance owed.
+        """
+        if self._completed:
+            raise GroupCompletedError("This group has already completed")
+
+        if len(self._members) < 2:
+            raise ValueError(
+                "At least 2 members are required before recording contributions"
+            )
+
+        normalised = member_id.strip().lower()
+        self._check_member(normalised)
+
+        try:
+            parsed = parse_amount(amount)
+        except (TypeError, ValueError) as exc:
+            raise InvalidAmountError(str(exc)) from exc
+
+        if parsed <= Decimal("0.00"):
+            raise InvalidAmountError("Contribution amount must be greater than zero")
+
+        owed = self.amount_owed(normalised)
+        if parsed > owed:
+            raise OverpaymentError(
+                f"Payment of {parsed} exceeds the remaining amount owed: {owed}"
+            )
+
+        # Lock member list on the very first successful contribution in week 1
+        if not self._locked:
+            self._lock()
+
+        self._payments[self.current_week][normalised] += parsed
+        return self._payments[self.current_week][normalised]
+
+    # ------------------------------------------------------------------
+    # Query helpers
+    # ------------------------------------------------------------------
+
+    def amount_paid(self, member_id: str, week: int | None = None) -> Decimal:
+        """Return how much member_id has paid in the given week (default: current)."""
+        normalised = member_id.strip().lower()
+        self._check_member(normalised)
+        w = self._resolve_week(week)
+        return self._payments[w][normalised]
+
+    def amount_owed(self, member_id: str, week: int | None = None) -> Decimal:
+        """Return how much member_id still owes in the given week (default: current)."""
+        paid = self.amount_paid(member_id, week)
+        return self._weekly_contribution - paid
+
+    def is_paid_in_full(self, member_id: str, week: int | None = None) -> bool:
+        """Return True if member_id has paid the full contribution for the week."""
+        return self.amount_owed(member_id, week) == Decimal("0.00")
